@@ -135,6 +135,9 @@ RESOURCE_ACTIONS: dict[str, dict[str, dict[str, str]]] = {
         "create": {"method": "POST", "path": "/api/v4/{entity_type}/tags"},
     },
     "notes": {
+        "list_all": {"method": "GET", "path": "/api/v4/{entity_type}/notes"},
+        "create_many": {"method": "POST", "path": "/api/v4/{entity_type}/notes"},
+        "update_many": {"method": "PATCH", "path": "/api/v4/{entity_type}/notes"},
         "list": {"method": "GET", "path": "/api/v4/{entity_type}/{entity_id}/notes"},
         "create": {"method": "POST", "path": "/api/v4/{entity_type}/{entity_id}/notes"},
         "update_one": {"method": "PATCH", "path": "/api/v4/{entity_type}/{entity_id}/notes/{note_id}"},
@@ -393,6 +396,12 @@ def ensure_array(value: Any, name: str) -> list[Any]:
     return value
 
 
+def chunked(items: list[Any], size: int) -> list[list[Any]]:
+    if size < 1 or size > 250:
+        raise McpError(-32602, "chunk_size must be between 1 and 250.")
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
 def ensure_entity_type(entity_type: str, allowed: tuple[str, ...], name: str = "entity_type") -> str:
     if entity_type not in allowed:
         raise McpError(-32602, f"Unsupported {name}: {entity_type}. Allowed: {', '.join(allowed)}.")
@@ -610,6 +619,78 @@ def tool_update_entity(args: dict[str, Any]) -> dict[str, Any]:
     entity_type = ensure_entity_type(str(args.get("entity_type", "")), ENTITY_COLLECTIONS)
     data = ensure_object(args.get("data"), "data")
     return amocrm_request("PATCH", entity_path(entity_type, args.get("id")), body=data)
+
+
+def batch_request(
+    method: str,
+    path: str,
+    items: list[Any],
+    chunk_size: int,
+    params: dict[str, Any] | None = None,
+    stop_on_error: bool = True,
+) -> dict[str, Any]:
+    chunks = chunked(items, chunk_size)
+    responses: list[dict[str, Any]] = []
+    created_or_updated: list[Any] = []
+    ok = True
+
+    for index, chunk in enumerate(chunks, 1):
+        response = amocrm_request(method, path, params=params, body=chunk)
+        data = response.get("data")
+        embedded = data.get("_embedded", {}) if isinstance(data, dict) else {}
+        if isinstance(embedded, dict):
+            for value in embedded.values():
+                if isinstance(value, list):
+                    created_or_updated.extend(value)
+
+        responses.append(
+            {
+                "chunk": index,
+                "items_count": len(chunk),
+                "ok": response.get("ok"),
+                "status": response.get("status"),
+                "data": data,
+            }
+        )
+        if not response.get("ok"):
+            ok = False
+            if stop_on_error:
+                break
+
+    processed_count = sum(item["items_count"] for item in responses)
+    return {
+        "ok": ok,
+        "method": method,
+        "path": path,
+        "chunk_size": chunk_size,
+        "total_items": len(items),
+        "processed_items": processed_count,
+        "chunks_total": len(chunks),
+        "chunks_processed": len(responses),
+        "items": created_or_updated,
+        "responses": responses,
+        "stopped_on_error": stop_on_error and not ok,
+    }
+
+
+def tool_batch_request(args: dict[str, Any]) -> dict[str, Any]:
+    method = str(args.get("method", "POST")).upper()
+    if method not in ("POST", "PATCH"):
+        raise McpError(-32602, "batch_request method must be POST or PATCH.")
+    path = str(args.get("path", ""))
+    items = ensure_array(args.get("items"), "items")
+    params = ensure_object(args.get("params"), "params")
+    chunk_size = int(args.get("chunk_size", 50))
+    stop_on_error = bool(args.get("stop_on_error", True))
+    return batch_request(method, path, items, chunk_size, params=params, stop_on_error=stop_on_error)
+
+
+def tool_batch_create_entities(args: dict[str, Any]) -> dict[str, Any]:
+    entity_type = ensure_entity_type(str(args.get("entity_type", "")), ENTITY_COLLECTIONS)
+    items = ensure_array(args.get("items"), "items")
+    chunk_size = int(args.get("chunk_size", 50))
+    stop_on_error = bool(args.get("stop_on_error", True))
+    return batch_request("POST", entity_path(entity_type), items, chunk_size, stop_on_error=stop_on_error)
 
 
 def nested_entity_path(entity_type: str, entity_id: Any, suffix: str) -> str:
@@ -852,6 +933,21 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Callable[[dict[str, Any]], Any]]] = 
         ),
         tool_api_request,
     ),
+    "amocrm_batch_request": (
+        "Send large POST/PATCH array payloads to any amoCRM /api/... endpoint in chunks. Use for mass create/update operations.",
+        schema(
+            {
+                "method": enum_schema(("POST", "PATCH")),
+                "path": {"type": "string", "description": "Path such as /api/v4/leads or /api/v4/tasks."},
+                "params": {"type": "object", "additionalProperties": True},
+                "items": array_schema("Array payload split into chunked requests."),
+                "chunk_size": {"type": "integer", "minimum": 1, "maximum": 250, "default": 50},
+                "stop_on_error": {"type": "boolean", "default": True},
+            },
+            ["method", "path", "items"],
+        ),
+        tool_batch_request,
+    ),
     "amocrm_get_account": (
         "Get account parameters. Use 'with' for amojo_id, users_groups, task_types, version, entity_names, datetime_settings, drive_url, is_api_filter_enabled, invoices_settings.",
         schema({"with": {"type": "array", "items": {"type": "string"}}}),
@@ -871,6 +967,19 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Callable[[dict[str, Any]], Any]]] = 
         "Create one or more top-level entities. Body must be the amoCRM array payload.",
         schema({"entity_type": enum_schema(ENTITY_COLLECTIONS), "items": array_schema()}, ["entity_type", "items"]),
         tool_create_entities,
+    ),
+    "amocrm_batch_create_entities": (
+        "Create many top-level entities through amoCRM array endpoints, automatically splitting items into chunks.",
+        schema(
+            {
+                "entity_type": enum_schema(ENTITY_COLLECTIONS),
+                "items": array_schema("Array of entity payloads to create."),
+                "chunk_size": {"type": "integer", "minimum": 1, "maximum": 250, "default": 50},
+                "stop_on_error": {"type": "boolean", "default": True},
+            },
+            ["entity_type", "items"],
+        ),
+        tool_batch_create_entities,
     ),
     "amocrm_update_entities": (
         "Batch update top-level entities. Body must be the amoCRM array payload with IDs.",

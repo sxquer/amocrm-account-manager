@@ -107,6 +107,8 @@ export AMOCRM_RATE_LIMIT_SECONDS="0"
 - `amocrm_describe_capabilities` показывает карту ресурсов и действий.
 - `amocrm_get_account` получает параметры аккаунта.
 - `amocrm_list_entities`, `amocrm_get_entity`, `amocrm_create_entities`, `amocrm_update_entities`, `amocrm_update_entity` работают с верхнеуровневыми коллекциями.
+- `amocrm_batch_create_entities` создает много сущностей пачками, автоматически режет массив на чанки и соблюдает общий лимитер запросов.
+- `amocrm_batch_request` отправляет большие `POST`/`PATCH` array payloads в любой `/api/...` endpoint чанками.
 - `amocrm_entity_notes`, `amocrm_entity_links`, `amocrm_entity_tags` управляют заметками, связями и тегами.
 - `amocrm_custom_fields`, `amocrm_pipelines`, `amocrm_catalog_elements`, `amocrm_customer_transactions` закрывают специальные разделы.
 - `amocrm_resource_action` вызывает действие из встроенной карты amoCRM-ресурсов.
@@ -164,6 +166,25 @@ export AMOCRM_RATE_LIMIT_SECONDS="0"
   "params": { "limit": 250 }
 }
 ```
+
+Массово создать задачи пачками:
+
+```json
+{
+  "entity_type": "tasks",
+  "chunk_size": 50,
+  "items": [
+    {
+      "text": "Связаться с клиентом",
+      "complete_till": 1819756800,
+      "entity_id": 123,
+      "entity_type": "leads"
+    }
+  ]
+}
+```
+
+Для сценариев вроде "создай 20 сделок и задачи в них" используйте batch-подход: сначала `amocrm_batch_create_entities` для сделок, затем `amocrm_batch_create_entities` для задач с `entity_id` созданных сделок. Пример готового сценария лежит в `scripts/create_test_leads_with_tasks.py`.
 
 ## Документация amoCRM, по которой собран сервер
 

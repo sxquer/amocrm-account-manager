@@ -41,6 +41,8 @@ class ServerTests(unittest.TestCase):
     def test_tools_list_contains_generic_request(self):
         names = {tool["name"] for tool in server.list_tools()}
         self.assertIn("amocrm_api_request", names)
+        self.assertIn("amocrm_batch_request", names)
+        self.assertIn("amocrm_batch_create_entities", names)
         self.assertIn("amocrm_resource_action", names)
         self.assertIn("amocrm_get_account", names)
 
@@ -86,6 +88,37 @@ class ServerTests(unittest.TestCase):
             with mock.patch.object(server.time, "sleep") as sleep:
                 server.acquire_rate_limit_slot()
         sleep.assert_not_called()
+
+    def test_chunked_splits_items(self):
+        self.assertEqual(server.chunked([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
+
+    def test_batch_request_sends_chunks(self):
+        responses = [
+            {"ok": True, "status": 200, "data": {"_embedded": {"tasks": [{"id": 1}, {"id": 2}]}}},
+            {"ok": True, "status": 200, "data": {"_embedded": {"tasks": [{"id": 3}]}}},
+        ]
+        with mock.patch.object(server, "amocrm_request", side_effect=responses) as request:
+            result = server.batch_request("POST", "/api/v4/tasks", [{"a": 1}, {"a": 2}, {"a": 3}], 2)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["chunks_processed"], 2)
+        self.assertEqual(result["processed_items"], 3)
+        self.assertEqual(result["items"], [{"id": 1}, {"id": 2}, {"id": 3}])
+        self.assertEqual(request.call_args_list[0].kwargs["body"], [{"a": 1}, {"a": 2}])
+        self.assertEqual(request.call_args_list[1].kwargs["body"], [{"a": 3}])
+
+    def test_batch_request_stops_on_error(self):
+        responses = [
+            {"ok": False, "status": 400, "data": {"detail": "bad"}},
+            {"ok": True, "status": 200, "data": {}},
+        ]
+        with mock.patch.object(server, "amocrm_request", side_effect=responses) as request:
+            result = server.batch_request("POST", "/api/v4/tasks", [{"a": 1}, {"a": 2}], 1)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["stopped_on_error"])
+        self.assertEqual(result["chunks_processed"], 1)
+        self.assertEqual(request.call_count, 1)
 
 
 if __name__ == "__main__":
