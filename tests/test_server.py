@@ -120,6 +120,36 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(result["chunks_processed"], 1)
         self.assertEqual(request.call_count, 1)
 
+    def test_classify_api_resource(self):
+        self.assertEqual(server.classify_api_resource("/api/v4/tasks"), "tasks")
+        self.assertEqual(server.classify_api_resource("/api/v4/leads/pipelines"), "pipelines")
+        self.assertEqual(server.classify_api_resource("/api/v4/leads/pipelines/1/statuses"), "pipeline_statuses")
+        self.assertEqual(server.classify_api_resource("/api/v4/leads/custom_fields"), "custom_fields")
+        self.assertEqual(server.classify_api_resource("/api/v4/leads/custom_fields/groups"), "custom_field_groups")
+        self.assertEqual(server.classify_api_resource("/api/v4/leads/123/notes"), "notes")
+        self.assertEqual(server.classify_api_resource("/api/v4/catalogs/1/elements"), "catalog_elements")
+
+    def test_readonly_blocks_write_but_allows_read(self):
+        with mock.patch.dict(os.environ, {"AMOCRM_READONLY": "true"}, clear=True):
+            server.ensure_request_allowed("GET", "/api/v4/tasks")
+            with self.assertRaises(server.McpError):
+                server.ensure_request_allowed("POST", "/api/v4/tasks")
+
+    def test_write_allowlist_allows_only_named_resources(self):
+        with mock.patch.dict(os.environ, {"AMOCRM_WRITE_ALLOWLIST": "tasks,notes"}, clear=True):
+            server.ensure_request_allowed("PATCH", "/api/v4/tasks")
+            server.ensure_request_allowed("POST", "/api/v4/leads/notes")
+            with self.assertRaises(server.McpError):
+                server.ensure_request_allowed("PATCH", "/api/v4/leads/pipelines")
+
+    def test_write_denylist_blocks_named_resources(self):
+        with mock.patch.dict(os.environ, {"AMOCRM_WRITE_DENYLIST": "pipelines,pipeline_statuses,custom_fields"}, clear=True):
+            server.ensure_request_allowed("PATCH", "/api/v4/tasks")
+            with self.assertRaises(server.McpError):
+                server.ensure_request_allowed("POST", "/api/v4/leads/pipelines")
+            with self.assertRaises(server.McpError):
+                server.ensure_request_allowed("PATCH", "/api/v4/leads/custom_fields")
+
 
 if __name__ == "__main__":
     unittest.main()

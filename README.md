@@ -82,6 +82,34 @@ export AMOCRM_RATE_LIMIT_SECONDS="1"
 export AMOCRM_RATE_LIMIT_SECONDS="0"
 ```
 
+## Безопасный режим записи
+
+Можно запретить любые изменения в аккаунте:
+
+```bash
+export AMOCRM_READONLY="true"
+```
+
+В этом режиме MCP выполняет только `GET`. Любые `POST`, `PATCH`, `DELETE` блокируются до HTTP-запроса, включая `amocrm_api_request`, `amocrm_batch_request`, scripts и специализированные tools.
+
+Можно разрешить запись только в отдельные ресурсы:
+
+```bash
+export AMOCRM_WRITE_ALLOWLIST="tasks,notes"
+```
+
+Тогда, например, задачи и примечания можно менять, а сделки, воронки, поля, вебхуки и остальные ресурсы нельзя.
+
+Можно точечно запретить опасные ресурсы:
+
+```bash
+export AMOCRM_WRITE_DENYLIST="pipelines,pipeline_statuses,custom_fields,custom_field_groups"
+```
+
+Такой режим позволяет продолжать менять задачи или сделки, но запрещает менять/удалять воронки, этапы и поля.
+
+Поддерживаемые имена ресурсов в политике: `leads`, `contacts`, `companies`, `customers`, `tasks`, `pipelines`, `pipeline_statuses`, `custom_fields`, `custom_field_groups`, `tags`, `notes`, `links`, `catalogs`, `catalog_elements`, `customer_transactions`, `users`, `roles`, `webhooks`, `sources`, `unsorted`, `events`, `widgets`, `conversations`, `short_links`, `calls`, `chat_templates`.
+
 ## Подключение к MCP-клиенту
 
 Пример конфигурации:

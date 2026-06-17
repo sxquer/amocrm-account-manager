@@ -49,6 +49,8 @@ HTTP_METHODS = ("GET", "POST", "PATCH", "DELETE")
 DEFAULT_RATE_LIMIT_SECONDS = 1.0
 _PROCESS_RATE_LIMIT_LOCK = threading.Lock()
 _PROCESS_LAST_REQUEST_AT = 0.0
+READ_METHODS = ("GET",)
+WRITE_METHODS = ("POST", "PATCH", "DELETE")
 
 
 RESOURCE_ACTIONS: dict[str, dict[str, dict[str, str]]] = {
@@ -254,6 +256,22 @@ def first_env(names: tuple[str, ...]) -> tuple[str, str] | tuple[None, None]:
     return None, None
 
 
+def truthy_env(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def csv_env(*names: str) -> set[str]:
+    values: set[str] = set()
+    for name in names:
+        raw_value = os.environ.get(name, "")
+        for item in raw_value.split(","):
+            normalized = item.strip().lower()
+            if normalized:
+                values.add(normalized)
+    return values
+
+
 def configured_base_url() -> str | None:
     base_url = os.environ.get("AMOCRM_BASE_URL")
     if base_url:
@@ -352,6 +370,79 @@ def acquire_process_rate_limit_slot(interval: float) -> None:
         _PROCESS_LAST_REQUEST_AT = now
 
 
+def write_policy() -> dict[str, Any]:
+    return {
+        "readonly": truthy_env("AMOCRM_READONLY"),
+        "write_allowlist": sorted(csv_env("AMOCRM_WRITE_ALLOWLIST", "AMOCRM_MUTATION_ALLOWLIST")),
+        "write_denylist": sorted(csv_env("AMOCRM_WRITE_DENYLIST", "AMOCRM_MUTATION_DENYLIST")),
+    }
+
+
+def classify_api_resource(path_or_url: str) -> str:
+    parsed = urllib.parse.urlparse(path_or_url)
+    path = parsed.path or path_or_url
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 3 or parts[0] != "api":
+        return "unknown"
+
+    resource = parts[2]
+    if resource in {"leads", "contacts", "companies", "customers", "catalogs"}:
+        if "notes" in parts:
+            return "notes"
+        if len(parts) >= 4 and parts[3] == "custom_fields":
+            if len(parts) >= 5 and parts[4] == "groups":
+                return "custom_field_groups"
+            return "custom_fields"
+        if len(parts) >= 4 and parts[3] == "tags":
+            return "tags"
+        if resource == "leads":
+            if len(parts) >= 4 and parts[3] == "pipelines":
+                return "pipeline_statuses" if "statuses" in parts else "pipelines"
+            if len(parts) >= 4 and parts[3] == "loss_reasons":
+                return "loss_reasons"
+            if len(parts) >= 4 and parts[3] == "unsorted":
+                return "unsorted"
+        if resource == "catalogs" and len(parts) >= 5 and parts[4] == "elements":
+            return "catalog_elements"
+        if resource == "customers" and len(parts) >= 5 and parts[4] == "transactions":
+            return "customer_transactions"
+        if len(parts) >= 5 and parts[4] == "link":
+            return "links"
+        return resource
+
+    return resource
+
+
+def ensure_request_allowed(method: str, path_or_url: str) -> None:
+    method = method.upper()
+    if method in READ_METHODS:
+        return
+    if method not in WRITE_METHODS:
+        raise McpError(-32602, f"Unsupported HTTP method: {method}.")
+
+    policy = write_policy()
+    resource = classify_api_resource(path_or_url)
+    if policy["readonly"]:
+        raise McpError(
+            -32003,
+            f"Write operation denied by AMOCRM_READONLY=true. Resource '{resource}', method {method}.",
+        )
+
+    denylist = set(policy["write_denylist"])
+    if "*" in denylist or resource in denylist:
+        raise McpError(
+            -32003,
+            f"Write operation denied by AMOCRM_WRITE_DENYLIST for resource '{resource}', method {method}.",
+        )
+
+    allowlist = set(policy["write_allowlist"])
+    if allowlist and "*" not in allowlist and resource not in allowlist:
+        raise McpError(
+            -32003,
+            f"Write operation denied because resource '{resource}' is not in AMOCRM_WRITE_ALLOWLIST.",
+        )
+
+
 def config_status() -> dict[str, Any]:
     token_env, token = first_env(TOKEN_ENV_NAMES)
     return {
@@ -362,6 +453,7 @@ def config_status() -> dict[str, Any]:
         "timeout": float(os.environ.get("AMOCRM_TIMEOUT", "30")),
         "rate_limit_seconds": rate_limit_interval_seconds(),
         "rate_limit_lock_file": rate_limit_lock_path(),
+        "write_policy": write_policy(),
         "auth_mode": "long-lived Bearer token; no OAuth refresh flow",
     }
 
@@ -472,6 +564,7 @@ def amocrm_request(
         raise McpError(-32602, f"Unsupported HTTP method: {method}.")
 
     url = build_url(config, path, params)
+    ensure_request_allowed(method, url)
     headers = {
         "Accept": "application/hal+json, application/json",
         "Authorization": f"Bearer {config.token}",
