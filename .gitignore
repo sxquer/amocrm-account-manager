@@ -6,3 +6,5 @@ dist/
 build/
 *.egg-info/
 test_reports/
+.env
+.amocrm.env

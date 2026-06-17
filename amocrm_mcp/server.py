@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
@@ -51,6 +52,11 @@ _PROCESS_RATE_LIMIT_LOCK = threading.Lock()
 _PROCESS_LAST_REQUEST_AT = 0.0
 READ_METHODS = ("GET",)
 WRITE_METHODS = ("POST", "PATCH", "DELETE")
+LOCAL_ENV_FILENAMES = (".env", ".amocrm.env")
+_LOCAL_ENV_LOCK = threading.Lock()
+_LOCAL_ENV_LOADED = False
+_LOCAL_ENV_SOURCE: str | None = None
+_LOCAL_ENV_KEYS: set[str] = set()
 
 
 RESOURCE_ACTIONS: dict[str, dict[str, dict[str, str]]] = {
@@ -248,7 +254,103 @@ class AmoConfig:
     token_env: str
 
 
+def reset_local_env_cache() -> None:
+    global _LOCAL_ENV_LOADED, _LOCAL_ENV_SOURCE, _LOCAL_ENV_KEYS
+    with _LOCAL_ENV_LOCK:
+        _LOCAL_ENV_LOADED = False
+        _LOCAL_ENV_SOURCE = None
+        _LOCAL_ENV_KEYS = set()
+
+
+def strip_inline_comment(value: str) -> str:
+    in_single = False
+    in_double = False
+    for index, char in enumerate(value):
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char == "#" and not in_single and not in_double:
+            if index == 0 or value[index - 1].isspace():
+                return value[:index].rstrip()
+    return value.strip()
+
+
+def parse_env_value(value: str) -> str:
+    value = strip_inline_comment(value.strip())
+    quote = value[0] if value else ""
+    if len(value) >= 2 and value[0] == value[-1] and quote in {"'", '"'}:
+        value = value[1:-1]
+        if quote == '"':
+            return bytes(value, "utf-8").decode("unicode_escape")
+    return value
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        if not key.startswith("AMOCRM_"):
+            continue
+        values[key] = parse_env_value(raw_value)
+    return values
+
+
+def find_local_env_file(start: Path | None = None) -> Path | None:
+    explicit_path = os.environ.get("AMOCRM_ENV_FILE")
+    if explicit_path:
+        path = Path(explicit_path).expanduser()
+        return path if path.is_file() else None
+
+    current = (start or Path.cwd()).resolve()
+    for directory in (current, *current.parents):
+        for filename in LOCAL_ENV_FILENAMES:
+            path = directory / filename
+            if path.is_file():
+                return path
+    return None
+
+
+def load_local_env(force: bool = False) -> dict[str, Any]:
+    global _LOCAL_ENV_LOADED, _LOCAL_ENV_SOURCE, _LOCAL_ENV_KEYS
+    with _LOCAL_ENV_LOCK:
+        if _LOCAL_ENV_LOADED and not force:
+            return {
+                "loaded": bool(_LOCAL_ENV_SOURCE),
+                "source": _LOCAL_ENV_SOURCE,
+                "keys": sorted(_LOCAL_ENV_KEYS),
+            }
+
+        path = find_local_env_file()
+        _LOCAL_ENV_LOADED = True
+        _LOCAL_ENV_SOURCE = str(path) if path else None
+        _LOCAL_ENV_KEYS = set()
+        if not path:
+            return {"loaded": False, "source": None, "keys": []}
+
+        values = parse_env_file(path)
+        for key, value in values.items():
+            os.environ[key] = value
+        _LOCAL_ENV_KEYS = set(values.keys())
+        return {
+            "loaded": True,
+            "source": _LOCAL_ENV_SOURCE,
+            "keys": sorted(_LOCAL_ENV_KEYS),
+        }
+
+
 def first_env(names: tuple[str, ...]) -> tuple[str, str] | tuple[None, None]:
+    load_local_env()
     for name in names:
         value = os.environ.get(name)
         if value:
@@ -257,11 +359,13 @@ def first_env(names: tuple[str, ...]) -> tuple[str, str] | tuple[None, None]:
 
 
 def truthy_env(name: str) -> bool:
+    load_local_env()
     value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def csv_env(*names: str) -> set[str]:
+    load_local_env()
     values: set[str] = set()
     for name in names:
         raw_value = os.environ.get(name, "")
@@ -273,6 +377,7 @@ def csv_env(*names: str) -> set[str]:
 
 
 def configured_base_url() -> str | None:
+    load_local_env()
     base_url = os.environ.get("AMOCRM_BASE_URL")
     if base_url:
         return base_url.rstrip("/")
@@ -305,6 +410,7 @@ def load_config() -> AmoConfig:
 
 
 def rate_limit_interval_seconds() -> float:
+    load_local_env()
     raw_value = os.environ.get("AMOCRM_RATE_LIMIT_SECONDS", str(DEFAULT_RATE_LIMIT_SECONDS))
     try:
         value = float(raw_value)
@@ -316,6 +422,7 @@ def rate_limit_interval_seconds() -> float:
 
 
 def rate_limit_lock_path() -> str:
+    load_local_env()
     return os.environ.get(
         "AMOCRM_RATE_LIMIT_LOCK_FILE",
         os.path.join(tempfile.gettempdir(), "amocrm_mcp_rate_limit.lock"),
@@ -444,6 +551,7 @@ def ensure_request_allowed(method: str, path_or_url: str) -> None:
 
 
 def config_status() -> dict[str, Any]:
+    env_status = load_local_env()
     token_env, token = first_env(TOKEN_ENV_NAMES)
     return {
         "base_url": configured_base_url(),
@@ -453,6 +561,7 @@ def config_status() -> dict[str, Any]:
         "timeout": float(os.environ.get("AMOCRM_TIMEOUT", "30")),
         "rate_limit_seconds": rate_limit_interval_seconds(),
         "rate_limit_lock_file": rate_limit_lock_path(),
+        "local_env": env_status,
         "write_policy": write_policy(),
         "auth_mode": "long-lived Bearer token; no OAuth refresh flow",
     }

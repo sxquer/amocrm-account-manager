@@ -70,6 +70,28 @@ export AMOCRM_DOMAIN_SUFFIX="amocrm.com"
 export AMOCRM_TIMEOUT="30"
 ```
 
+## Локальный env проекта
+
+Если в рабочей папке проекта или в одной из родительских папок есть `.env` или `.amocrm.env`, MCP загружает из него `AMOCRM_*` настройки и они имеют приоритет над env, переданным MCP-клиентом.
+
+Пример `.env`:
+
+```bash
+AMOCRM_BASE_URL=https://example.amocrm.ru
+AMOCRM_LONG_LIVED_TOKEN=your-long-lived-token
+AMOCRM_READONLY=true
+AMOCRM_WRITE_ALLOWLIST=tasks,notes
+AMOCRM_RATE_LIMIT_SECONDS=1
+```
+
+Загружаются только переменные с префиксом `AMOCRM_`; остальные строки игнорируются. Можно указать явный путь:
+
+```bash
+AMOCRM_ENV_FILE=/absolute/path/to/.amocrm.env
+```
+
+Файлы `.env` и `.amocrm.env` добавлены в `.gitignore`, потому что обычно содержат токены.
+
 Все HTTP-запросы к amoCRM проходят через общий лимитер. По умолчанию сервер делает не чаще одного запроса в секунду, включая MCP tools, пагинацию и локальные scripts:
 
 ```bash

@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -9,6 +10,7 @@ from amocrm_mcp import server
 class ServerTests(unittest.TestCase):
     def tearDown(self):
         server._PROCESS_LAST_REQUEST_AT = 0.0
+        server.reset_local_env_cache()
 
     def test_build_url_from_subdomain_and_params(self):
         with mock.patch.dict(
@@ -149,6 +151,62 @@ class ServerTests(unittest.TestCase):
                 server.ensure_request_allowed("POST", "/api/v4/leads/pipelines")
             with self.assertRaises(server.McpError):
                 server.ensure_request_allowed("PATCH", "/api/v4/leads/custom_fields")
+
+    def test_local_env_file_overrides_mcp_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = os.path.join(tmpdir, ".env")
+            with open(env_path, "w", encoding="utf-8") as file:
+                file.write(
+                    "\n".join(
+                        [
+                            "AMOCRM_BASE_URL=https://local.amocrm.ru",
+                            "AMOCRM_LONG_LIVED_TOKEN=local-token",
+                            "AMOCRM_READONLY=true",
+                            "AMOCRM_WRITE_ALLOWLIST=tasks,notes",
+                            "IGNORED_SECRET=must-not-load",
+                        ]
+                    )
+                )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AMOCRM_ENV_FILE": env_path,
+                    "AMOCRM_BASE_URL": "https://mcp.amocrm.ru",
+                    "AMOCRM_LONG_LIVED_TOKEN": "mcp-token",
+                },
+                clear=True,
+            ):
+                server.reset_local_env_cache()
+                config = server.load_config()
+                status = server.config_status()
+
+        self.assertEqual(config.base_url, "https://local.amocrm.ru")
+        self.assertEqual(config.token, "local-token")
+        self.assertTrue(status["write_policy"]["readonly"])
+        self.assertEqual(status["write_policy"]["write_allowlist"], ["notes", "tasks"])
+        self.assertEqual(status["local_env"]["source"], env_path)
+        self.assertNotIn("IGNORED_SECRET", os.environ)
+
+    def test_parse_env_file_supports_export_quotes_and_comments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = os.path.join(tmpdir, ".amocrm.env")
+            with open(env_path, "w", encoding="utf-8") as file:
+                file.write(
+                    "\n".join(
+                        [
+                            'export AMOCRM_BASE_URL="https://quoted.amocrm.ru" # comment',
+                            "AMOCRM_READONLY='true'",
+                            "AMOCRM_WRITE_DENYLIST=pipelines,custom_fields",
+                            "NOT_AMOCRM=value",
+                        ]
+                    )
+                )
+            values = server.parse_env_file(server.Path(env_path))
+
+        self.assertEqual(values["AMOCRM_BASE_URL"], "https://quoted.amocrm.ru")
+        self.assertEqual(values["AMOCRM_READONLY"], "true")
+        self.assertEqual(values["AMOCRM_WRITE_DENYLIST"], "pipelines,custom_fields")
+        self.assertNotIn("NOT_AMOCRM", values)
 
 
 if __name__ == "__main__":
