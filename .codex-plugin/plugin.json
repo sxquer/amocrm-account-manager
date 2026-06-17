@@ -1,0 +1,36 @@
+{
+  "name": "amocrm-account-manager",
+  "version": "0.1.0",
+  "description": "amoCRM MCP server and skills for designing, creating, auditing, and configuring amoCRM accounts.",
+  "author": {
+    "name": "dns"
+  },
+  "license": "MIT",
+  "keywords": [
+    "amocrm",
+    "crm",
+    "mcp",
+    "sales",
+    "pipelines",
+    "automation"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "amoCRM Account Manager",
+    "shortDescription": "Manage and configure amoCRM accounts with MCP and skills.",
+    "longDescription": "Tools and workflows for amoCRM account architecture: create pipelines, statuses, fields, catalogs, tags, test entities, and niche-specific CRM setups using a long-lived token.",
+    "developerName": "dns",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Automation"
+    ],
+    "defaultPrompt": [
+      "Создай воронку amoCRM",
+      "Настрой amoCRM под мою нишу",
+      "Проведи аудит аккаунта amoCRM"
+    ]
+  }
+}

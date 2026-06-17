@@ -1,0 +1,4 @@
+interface:
+  display_name: "amoCRM Pipeline Builder"
+  short_description: "Create amoCRM pipelines using communication-fact stages."
+  default_prompt: "Создай воронку amoCRM по коммуникация-факт"
