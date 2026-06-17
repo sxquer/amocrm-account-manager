@@ -132,6 +132,30 @@ export AMOCRM_WRITE_DENYLIST="pipelines,pipeline_statuses,custom_fields,custom_f
 
 Поддерживаемые имена ресурсов в политике: `leads`, `contacts`, `companies`, `customers`, `tasks`, `pipelines`, `pipeline_statuses`, `custom_fields`, `custom_field_groups`, `tags`, `notes`, `links`, `catalogs`, `catalog_elements`, `customer_transactions`, `users`, `roles`, `webhooks`, `sources`, `unsorted`, `events`, `widgets`, `conversations`, `short_links`, `calls`, `chat_templates`.
 
+### Security disclaimer
+
+`AMOCRM_READONLY`, `AMOCRM_WRITE_ALLOWLIST` и `AMOCRM_WRITE_DENYLIST` — это защитные ограничения внутри этого MCP-сервера, а не полноценная security boundary.
+
+Если агенту доступен write-capable amoCRM token локально — в env, `.env`, Codex config, shell history, keychain, Docker secret, логах или файлах проекта — агент с доступом к shell/файловой системе теоретически может обойти MCP и вызвать amoCRM API напрямую. Локальный READONLY-режим защищает только официальный путь через MCP.
+
+Строгий вариант для read-only или ограниченного write-доступа:
+
+```text
+Codex / local MCP
+  не хранит amoCRM token
+  обращается только к remote gateway
+
+Remote gateway
+  хранит amoCRM token
+  применяет READONLY / allowlist / denylist policy
+  проксирует только разрешенные запросы
+  пишет audit log
+
+amoCRM API
+```
+
+В такой схеме локально хранится только gateway-token с ограниченными возможностями. Настоящий amoCRM token не покидает удаленный gateway и не возвращается агенту. Это единственный надежный способ не дать локальному агенту использовать write-token в обход MCP.
+
 ## Подключение к MCP-клиенту
 
 Пример конфигурации:
