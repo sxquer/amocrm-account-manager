@@ -70,6 +70,18 @@ export AMOCRM_DOMAIN_SUFFIX="amocrm.com"
 export AMOCRM_TIMEOUT="30"
 ```
 
+Все HTTP-запросы к amoCRM проходят через общий лимитер. По умолчанию сервер делает не чаще одного запроса в секунду, включая MCP tools, пагинацию и локальные scripts:
+
+```bash
+export AMOCRM_RATE_LIMIT_SECONDS="1"
+```
+
+Лимитер межпроцессный: несколько параллельных запусков используют общий lock-файл в temp-директории. Для тестов можно отключить ожидание:
+
+```bash
+export AMOCRM_RATE_LIMIT_SECONDS="0"
+```
+
 ## Подключение к MCP-клиенту
 
 Пример конфигурации:

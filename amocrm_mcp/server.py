@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import re
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -13,6 +15,11 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import __version__
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback.
+    fcntl = None  # type: ignore[assignment]
 
 
 API_VERSION = "2024-11-05"
@@ -39,6 +46,9 @@ TAG_ENTITIES = ("leads", "contacts", "companies", "customers")
 NOTE_ENTITIES = ("leads", "contacts", "companies", "customers")
 LINK_ENTITIES = ("leads", "contacts", "companies", "customers")
 HTTP_METHODS = ("GET", "POST", "PATCH", "DELETE")
+DEFAULT_RATE_LIMIT_SECONDS = 1.0
+_PROCESS_RATE_LIMIT_LOCK = threading.Lock()
+_PROCESS_LAST_REQUEST_AT = 0.0
 
 
 RESOURCE_ACTIONS: dict[str, dict[str, dict[str, str]]] = {
@@ -273,6 +283,72 @@ def load_config() -> AmoConfig:
     return AmoConfig(base_url=base_url, token=token, timeout=timeout, token_env=token_env or "")
 
 
+def rate_limit_interval_seconds() -> float:
+    raw_value = os.environ.get("AMOCRM_RATE_LIMIT_SECONDS", str(DEFAULT_RATE_LIMIT_SECONDS))
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise McpError(-32001, "AMOCRM_RATE_LIMIT_SECONDS must be a number.") from exc
+    if value < 0:
+        raise McpError(-32001, "AMOCRM_RATE_LIMIT_SECONDS must be greater than or equal to 0.")
+    return value
+
+
+def rate_limit_lock_path() -> str:
+    return os.environ.get(
+        "AMOCRM_RATE_LIMIT_LOCK_FILE",
+        os.path.join(tempfile.gettempdir(), "amocrm_mcp_rate_limit.lock"),
+    )
+
+
+def acquire_rate_limit_slot() -> None:
+    interval = rate_limit_interval_seconds()
+    if interval == 0:
+        return
+
+    if fcntl is None:
+        acquire_process_rate_limit_slot(interval)
+        return
+
+    path = rate_limit_lock_path()
+    lock_dir = os.path.dirname(path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            lock_file.seek(0)
+            raw_last_request = lock_file.read().strip()
+            try:
+                last_request_at = float(raw_last_request) if raw_last_request else 0.0
+            except ValueError:
+                last_request_at = 0.0
+
+            now = time.monotonic()
+            wait_for = interval - (now - last_request_at)
+            if wait_for > 0:
+                time.sleep(wait_for)
+                now = time.monotonic()
+
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(f"{now:.9f}")
+            lock_file.flush()
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_process_rate_limit_slot(interval: float) -> None:
+    global _PROCESS_LAST_REQUEST_AT
+    with _PROCESS_RATE_LIMIT_LOCK:
+        now = time.monotonic()
+        wait_for = interval - (now - _PROCESS_LAST_REQUEST_AT)
+        if wait_for > 0:
+            time.sleep(wait_for)
+            now = time.monotonic()
+        _PROCESS_LAST_REQUEST_AT = now
+
+
 def config_status() -> dict[str, Any]:
     token_env, token = first_env(TOKEN_ENV_NAMES)
     return {
@@ -281,6 +357,8 @@ def config_status() -> dict[str, Any]:
         "token_configured": bool(token),
         "token_env": token_env,
         "timeout": float(os.environ.get("AMOCRM_TIMEOUT", "30")),
+        "rate_limit_seconds": rate_limit_interval_seconds(),
+        "rate_limit_lock_file": rate_limit_lock_path(),
         "auth_mode": "long-lived Bearer token; no OAuth refresh flow",
     }
 
@@ -398,6 +476,7 @@ def amocrm_request(
         headers.update(extra_headers)
 
     request = urllib.request.Request(url=url, data=payload, headers=headers, method=method)
+    acquire_rate_limit_slot()
     started = time.time()
     try:
         with urllib.request.urlopen(request, timeout=config.timeout) as response:

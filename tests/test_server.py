@@ -7,6 +7,9 @@ from amocrm_mcp import server
 
 
 class ServerTests(unittest.TestCase):
+    def tearDown(self):
+        server._PROCESS_LAST_REQUEST_AT = 0.0
+
     def test_build_url_from_subdomain_and_params(self):
         with mock.patch.dict(
             os.environ,
@@ -63,6 +66,26 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         payload = json.loads(result["content"][0]["text"])
         self.assertIn("base URL is not configured", payload["error"])
+
+    def test_rate_limit_defaults_to_one_second(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(server.rate_limit_interval_seconds(), 1.0)
+
+    def test_process_rate_limit_waits_between_requests(self):
+        with mock.patch.object(server.time, "monotonic", side_effect=[100.0, 100.2, 101.0]):
+            with mock.patch.object(server.time, "sleep") as sleep:
+                server.acquire_process_rate_limit_slot(1.0)
+                server.acquire_process_rate_limit_slot(1.0)
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.8)
+        self.assertEqual(server._PROCESS_LAST_REQUEST_AT, 101.0)
+
+    def test_rate_limit_can_be_disabled_for_tests(self):
+        with mock.patch.dict(os.environ, {"AMOCRM_RATE_LIMIT_SECONDS": "0"}, clear=True):
+            with mock.patch.object(server.time, "sleep") as sleep:
+                server.acquire_rate_limit_slot()
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":
